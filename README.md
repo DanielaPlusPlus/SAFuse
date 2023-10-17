@@ -3,7 +3,7 @@
 Data Augmentation for Deep Visual Recognition Using Superpixel Based Pairwise Image Fusion 
 ==============================================================================================================
 
-![image](https://github.com/DanielaPlusPlus/LGCOAMix/blob/main/framework.png)
+![image](https://github.com/DanielaPlusPlus/SAFuse/blob/main/framework.png)
 
 The source pytorch codes and some trained models are available here.
 
