@@ -1,77 +1,26 @@
-import torchvision
-import torch.utils.model_zoo as model_zoo
-import torch.nn as nn
-import torch
+
+"""
+https://github.com/bearpaw/pytorch-classification/blob/master/models/imagenet/resnext.py
+https://mycuhk-my.sharepoint.com/personal/1155056070_link_cuhk_edu_hk/_layouts/15/onedrive.aspx?ga=1&id=%2Fpersonal%2F1155056070%5Flink%5Fcuhk%5Fedu%5Fhk%2FDocuments%2Frelease%2Fpytorch%2Dclassification%2Fcheckpoints%2Fimagenet
+"""
+from __future__ import division
+""" 
+Creates a ResNeXt Model as defined in:
+Xie, S., Girshick, R., Dollar, P., Tu, Z., & He, K. (2016). 
+Aggregated residual transformations for deep neural networks. 
+arXiv preprint arXiv:1611.05431.
+import from https://github.com/facebookresearch/ResNeXt/blob/master/models/resnext.lua
+"""
 import math
-import numpy as np
-import copy
-import itertools
+import torch.nn as nn
 import torch.nn.functional as F
-from torch.nn import init
-"""
-x1和x2,x_mix一起输入,x1和x2进行local classification, loss值对应entropy,每个cell, loss越小,交叉熵越小, 能代表target的可能性越大.mix时候取到的概率更大
-"""
-"""
-https://pytorch.org/tutorials/intermediate/spatial_transformer_tutorial.html
-"""
-################################
+import numpy as np
+import torch
+from collections import OrderedDict
 
-def resnet18(pretrained=False, **kwargs):
-    """Constructs a ResNet-18 model.
-    Args:
-        pretrained (bool): If True, returns a model pre-trained on ImageNet
-    """
-    model = ResNet(BasicBlock, [2, 2, 2, 2],**kwargs)
-    if pretrained:
-        pretrained_model = model_zoo.load_url(model_urls['resnet18'])
-        state = model.state_dict()
-        for key in state.keys():
-            if key in pretrained_model.keys():
-                state[key] = pretrained_model[key]
-        model.load_state_dict(state)
-    return model
 
-def resnet50(pretrained=False, **kwargs):
-    """Constructs a ResNet-50 model.
-    Args:
-        pretrained (bool): If True, returns a model pre-trained on ImageNet
-    """
-    model = ResNet(Bottleneck, [3, 4, 6, 3], **kwargs)
-    ##load model trained from imagenet
-    if pretrained:
-        pretrained_model = model_zoo.load_url(model_urls['resnet50'])
-        state = model.state_dict()
-        for key in state.keys():
-            if key in pretrained_model.keys():
-                state[key] = pretrained_model[key]
-        model.load_state_dict(state)
+__all__ = ['resnext50', 'resnext101', 'resnext152']
 
-    return model
-
-def resnet101(pretrained=False, **kwargs):
-    """Constructs a ResNet-50 model.
-    Args:
-        pretrained (bool): If True, returns a model pre-trained on ImageNet
-    """
-    model = ResNet(Bottleneck, [3, 4, 23, 3], **kwargs)
-    ##load model trained from imagenet
-    if pretrained:
-        pretrained_model = model_zoo.load_url(model_urls['resnet101'])
-        state = model.state_dict()
-        for key in state.keys():
-            if key in pretrained_model.keys():
-                state[key] = pretrained_model[key]
-        model.load_state_dict(state)
-
-    return model
-
-model_urls = {
-    'resnet18': 'https://download.pytorch.org/models/resnet18-5c106cde.pth',
-    'resnet34': 'https://download.pytorch.org/models/resnet34-333f7ec4.pth',
-    'resnet50': 'https://download.pytorch.org/models/resnet50-19c8e357.pth',
-    'resnet101': 'https://download.pytorch.org/models/resnet101-5d3b4d8f.pth',
-    'resnet152': 'https://download.pytorch.org/models/resnet152-b121ed2d.pth',
-}
 
 # Returns 2D convolutional layer with space-preserving padding
 """https://github.com/amiltonwong/pytorch_fcn/blob/master/model.py"""
@@ -97,39 +46,93 @@ def conv(in_planes, out_planes, kernel_size=3, stride=1,  padding=1, output_padd
   return layer
 
 
+class Bottleneck(nn.Module):
+    """
+    RexNeXt bottleneck type C
+    """
+    expansion = 4
 
-class ResNet(nn.Module):
-    def __init__(self, block, layers, num_classes=1000):
+    def __init__(self, inplanes, planes, baseWidth, cardinality, stride=1, downsample=None):
+        """ Constructor
+        Args:
+            inplanes: input channel dimensionality
+            planes: output channel dimensionality
+            baseWidth: base width.
+            cardinality: num of convolution groups.
+            stride: conv stride. Replaces pooling layer.
+        """
+        super(Bottleneck, self).__init__()
+
+        D = int(math.floor(planes * (baseWidth / 64)))
+        C = cardinality
+
+        self.conv1 = nn.Conv2d(inplanes, D*C, kernel_size=1, stride=1, padding=0, bias=False)
+        self.bn1 = nn.BatchNorm2d(D*C)
+        self.conv2 = nn.Conv2d(D*C, D*C, kernel_size=3, stride=stride, padding=1, groups=C, bias=False)
+        self.bn2 = nn.BatchNorm2d(D*C)
+        self.conv3 = nn.Conv2d(D*C, planes * 4, kernel_size=1, stride=1, padding=0, bias=False)
+        self.bn3 = nn.BatchNorm2d(planes * 4)
+        self.relu = nn.ReLU(inplace=True)
+
+        self.downsample = downsample
+
+    def forward(self, x):
+        residual = x
+
+        out = self.conv1(x)
+        out = self.bn1(out)
+        out = self.relu(out)
+
+        out = self.conv2(out)
+        out = self.bn2(out)
+        out = self.relu(out)
+
+        out = self.conv3(out)
+        out = self.bn3(out)
+
+        if self.downsample is not None:
+            residual = self.downsample(x)
+
+        out += residual
+        out = self.relu(out)
+
+        return out
+
+class ResNeXt(nn.Module):
+    """
+    ResNext optimized for the ImageNet dataset, as specified in
+    https://arxiv.org/pdf/1611.05431.pdf
+    """
+    def __init__(self, baseWidth, cardinality, layers, num_classes):
+        """ Constructor
+        Args:
+            baseWidth: baseWidth for ResNeXt.
+            cardinality: number of convolution groups.
+            layers: config of layers, e.g., [3, 4, 6, 3]
+            num_classes: number of classes
+        """
+        super(ResNeXt, self).__init__()
+        block = Bottleneck
+
+        self.cardinality = cardinality
+        self.baseWidth = baseWidth
+        self.num_classes = num_classes
         self.inplanes = 64
-        super(ResNet, self).__init__()
-        # 网络输入部分
-        # self.conv1 = nn.Conv2d(3, 64, kernel_size=7, stride=2, padding=3,bias=False)
-        self.conv1_3k3 = nn.Conv2d(3, 64, kernel_size=3,padding=1, bias=False)#修改点1
+        self.output_size = 64
+
+        # 修改1
+        # self.conv1 = nn.Conv2d(3, 64, 7, 2, 3, bias=False)#修改前
+        self.conv1_3k3 = nn.Conv2d(3, 64, 3, 1, 1, bias=False)#修改后
         self.bn1 = nn.BatchNorm2d(64)
         self.relu = nn.ReLU(inplace=True)
-        # self.maxpool = nn.MaxPool2d(kernel_size=3, stride=2, padding=1)
+        self.maxpool1 = nn.MaxPool2d(kernel_size=3, stride=2, padding=1)
 
-        # 中间卷积部分
-        # self.layer1 = self._make_layer(block, 64, layers[0])
-        self.layer1_3k3 = self._make_layer(block, 64, layers[0], stride=1)#修改点2
-        self.layer2 = self._make_layer(block, 128, layers[1], stride=2)
-        self.layer3 = self._make_layer(block, 256, layers[2], stride=2)
-        self.layer4 = self._make_layer(block, 512, layers[3], stride=2)
-
-        self.relu = nn.ReLU(inplace=True)
-        self.conv5 = conv(512 * block.expansion, 128 * block.expansion, stride=2, transposed=True)
-        self.bn5 = nn.BatchNorm2d(128 * block.expansion)
-        self.conv6 = conv(128 * block.expansion + 256 * block.expansion, 64 * block.expansion, stride=2, transposed=True)
-        self.bn6 = nn.BatchNorm2d(64 * block.expansion)
-        self.conv7 = conv(64 * block.expansion + 128 * block.expansion, 32 * block.expansion, stride=2, transposed=True)
-        self.bn7 = nn.BatchNorm2d(32 * block.expansion)
-        self.conv8 = conv(32 * block.expansion + 64 * block.expansion, 64, kernel_size=1, stride=1, padding=0, output_padding=0, transposed=True)
-        self.bn8 = nn.BatchNorm2d(64)
-        self.conv9 = conv(64 + 64, 64, kernel_size=1, stride=1, padding=0, output_padding=0, transposed=True)
-        self.bn9 = nn.BatchNorm2d(64)
-        # self.conv10 = conv(32, num_classes, kernel_size=7)
-        # init.constant(self.conv10.weight, 0)  # Zero init
-
+        self.layer1 = self._make_layer(block, 64, layers[0])
+        self.layer2 = self._make_layer(block, 128, layers[1], 2)
+        self.layer3 = self._make_layer(block, 256, layers[2], 2)
+        self.layer4 = self._make_layer(block, 512, layers[3], 2)
+        # 修改3
+        # self.avgpool = nn.AvgPool2d(7)#修改前
         self.SA = SelfAttention(input_size=64)
         self.SAP = self.SuperpixelAttentionPooling
 
@@ -137,18 +140,39 @@ class ResNet(nn.Module):
         # self.fc = nn.Linear(512 * block.expansion, num_classes)
 
         self.fc2 = nn.Linear(2112, num_classes)
-        self.fc_local = nn.Linear(16 * block.expansion, num_classes)
+        self.fc_local = nn.Linear(64, num_classes)
+
+
+        expansion = 4
+        self.relu = nn.ReLU(inplace=True)
+        self.conv5 = conv(512 * expansion, 128 * expansion, stride=2, transposed=True)
+        self.bn5 = nn.BatchNorm2d(128 * expansion)
+        self.conv6 = conv(128 * expansion + 256 * expansion, 64 * expansion, stride=2, transposed=True)
+        self.bn6 = nn.BatchNorm2d(64 * expansion)
+        self.conv7 = conv(64 * expansion + 128 * expansion, 32 * expansion, stride=2, transposed=True)
+        self.bn7 = nn.BatchNorm2d(32 * expansion)
+        self.conv8 = conv(32 * expansion + 64 * expansion, 64, kernel_size=1, stride=1, padding=0, output_padding=0, transposed=True)
+        self.bn8 = nn.BatchNorm2d(64)
+        self.conv9 = conv(64 + 64, 64, kernel_size=1, stride=1, padding=0, output_padding=0, transposed=True)
+        self.bn9 = nn.BatchNorm2d(64)
 
         for m in self.modules():
             if isinstance(m, nn.Conv2d):
-                nn.init.kaiming_normal_(m.weight, mode='fan_out', nonlinearity='relu')
-            elif isinstance(m, nn.ConvTranspose2d):
-                nn.init.kaiming_normal_(m.weight, mode='fan_out', nonlinearity='relu')
+                n = m.kernel_size[0] * m.kernel_size[1] * m.out_channels
+                m.weight.data.normal_(0, math.sqrt(2. / n))
             elif isinstance(m, nn.BatchNorm2d):
-                nn.init.constant_(m.weight, 1)
-                nn.init.constant_(m.bias, 0)
+                m.weight.data.fill_(1)
+                m.bias.data.zero_()
 
-    def _make_layer(self, block, planes, blocks, stride=1):#是用来构建ResNet网络中的4个blocks
+    def _make_layer(self, block, planes, blocks, stride=1):
+        """ Stack n bottleneck modules where n is inferred from the depth of the network.
+        Args:
+            block: block type used to construct ResNext
+            planes: number of output channels (need to multiply by block.expansion)
+            blocks: number of blocks to be built
+            stride: factor to reduce the spatial dimensionality in the first bottleneck of the block.
+        Returns: a Module consisting of n sequential bottlenecks.
+        """
         downsample = None
         if stride != 1 or self.inplanes != planes * block.expansion:
             downsample = nn.Sequential(
@@ -156,16 +180,14 @@ class ResNet(nn.Module):
                           kernel_size=1, stride=stride, bias=False),
                 nn.BatchNorm2d(planes * block.expansion),
             )
+
         layers = []
-        #将每个blocks的第一个residual结构保存在layers列表中
-        layers.append(block(self.inplanes, planes, stride, downsample))
+        layers.append(block(self.inplanes, planes, self.baseWidth, self.cardinality, stride, downsample))
         self.inplanes = planes * block.expansion
-        #将每个blocks的剩下residual 结构保存在layers列表中
         for i in range(1, blocks):
-            layers.append(block(self.inplanes, planes))
+            layers.append(block(self.inplanes, planes, self.baseWidth, self.cardinality))
 
         return nn.Sequential(*layers)
-
 
     def SuperpixelAttentionPooling(self, x, SuperP_mask, atten_top_ratio):
         # print(x.shape)#torch.Size([32, 256, 32, 32])
@@ -202,11 +224,13 @@ class ResNet(nn.Module):
 
         return avgpool_sa_batch, avgpool_sa_batch_sel, topN_idx_batch
 
+
     def forward(self, x, local=False, superpixel_map=None, topN_local_ratio=None):
+        #修改后
         x0 = self.relu(self.bn1(self.conv1_3k3(x)))
         # print(x0.shape) #torch.Size([32, 64, 32, 32])
         # x = self.maxpool(x)
-        x1 = self.layer1_3k3(x0)
+        x1 = self.layer1(x0)
         # print(x1.shape)  #torch.Size([32, 256, 32, 32])
         x2 = self.layer2(x1)
         # print(x2.shape) #torch.Size([32, 512, 16, 16])
@@ -214,7 +238,6 @@ class ResNet(nn.Module):
         # print(x3.shape)  #torch.Size([32, 1024, 8, 8])
         x4 = self.layer4(x3)
         # print(x4.shape)   #torch.Size([32, 2048, 4, 4])
-
 
         x_up1 = self.relu(self.bn5(self.conv5(x4)))
         # print(x_up1.shape, x3.shape)  #torch.Size([32, 512, 8, 8]) torch.Size([32, 1024, 8, 8])
@@ -252,78 +275,41 @@ class ResNet(nn.Module):
         else:
             return logits2
 
-class Bottleneck(nn.Module):
-    expansion = 4
 
-    def __init__(self, inplanes, planes, stride=1, downsample=None):
-        super(Bottleneck, self).__init__()
-        self.conv1 = nn.Conv2d(inplanes, planes, kernel_size=1, bias=False)
-        self.bn1 = nn.BatchNorm2d(planes)
-        self.conv2 = nn.Conv2d(planes, planes, kernel_size=3, stride=stride,padding=1, bias=False)
-        self.bn2 = nn.BatchNorm2d(planes)
-        self.conv3 = nn.Conv2d(planes, planes * self.expansion, kernel_size=1, bias=False)
-        self.bn3 = nn.BatchNorm2d(planes * self.expansion)
-        self.relu = nn.ReLU(inplace=True)
-        self.downsample = downsample
-        self.stride = stride
+def resnext50(pretrained=False, baseWidth=4, cardinality=32):#resnext50-32x4d
+    """
+    Construct ResNeXt-50.
+    """
+    model = ResNeXt(baseWidth, cardinality, [3, 4, 6, 3], 1000)
+    pretrain_on_ImageNet = "./networks/resnext50_best.pth.tar"
+    if pretrained:
+        model_dict = torch.load(pretrain_on_ImageNet)
+        new_state_dict = OrderedDict()
+        for k, v in model_dict['state_dict'].items():
+            name = k.replace('module.', '')  # remove `module.`
+            new_state_dict[name] = v
+        model.load_state_dict(new_state_dict)
+        # model = torch.load(pretrain_on_ImageNet)['state_dict']
+    return model
 
-    def forward(self, x):
-        residual = x
-        out = self.conv1(x)
-        out = self.bn1(out)
-        out = self.relu(out)
 
-        out = self.conv2(out)
-        out = self.bn2(out)
-        out = self.relu(out)
+def resnext101(baseWidth, cardinality):
+    """
+    Construct ResNeXt-101.
+    """
+    model = ResNeXt(baseWidth, cardinality, [3, 4, 23, 3], 1000)
+    return model
 
-        out = self.conv3(out)
-        out = self.bn3(out)
 
-        if self.downsample is not None:
-            residual = self.downsample(x)
-
-        out += residual
-        out = self.relu(out)
-        return out
-
-def conv3x3(in_planes, out_planes, stride=1):
-    """3x3 convolution with padding"""
-    return nn.Conv2d(in_planes, out_planes, kernel_size=3, stride=stride,padding=1, bias=False)
-
-class BasicBlock(nn.Module):
-    expansion = 1
-    def __init__(self, inplanes, planes, stride=1, downsample=None):
-        super(BasicBlock, self).__init__()
-        self.conv1 = conv3x3(inplanes, planes, stride)
-        self.bn1 = nn.BatchNorm2d(planes)
-        self.relu = nn.ReLU(inplace=True)
-        self.conv2 = conv3x3(planes, planes)
-        self.bn2 = nn.BatchNorm2d(planes)
-        self.downsample = downsample   #对输入特征图大小进行减半处理
-        self.stride = stride
-
-    def forward(self, x):
-        residual = x
-
-        out = self.conv1(x)
-        out = self.bn1(out)
-        out = self.relu(out)
-
-        out = self.conv2(out)
-        out = self.bn2(out)
-
-        if self.downsample is not None:
-            residual = self.downsample(x)
-
-        out += residual
-        out = self.relu(out)
-        return out
+def resnext152(baseWidth, cardinality):
+    """
+    Construct ResNeXt-152.
+    """
+    model = ResNeXt(baseWidth, cardinality, [3, 8, 36, 3], 1000)
+    return model
 
 
 """https://blog.csdn.net/beilizhang/article/details/115282604"""
-
-
 class LayerNorm(nn.Module):
     def __init__(self, hidden_size, eps=1e-12):
         """Construct a layernorm module in the TF style (epsilon inside the square root).

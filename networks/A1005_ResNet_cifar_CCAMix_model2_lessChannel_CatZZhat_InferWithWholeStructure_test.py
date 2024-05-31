@@ -250,7 +250,7 @@ class ResNet(nn.Module):
                 # print(F.sigmoid(x_sap_list[sp].sum(1)))
             return logits2, x_locals_out_batch, weights_locals_out_batch, topN_local_idx
         else:
-            return logits2
+            return logits2,x4
 
 class Bottleneck(nn.Module):
     expansion = 4
